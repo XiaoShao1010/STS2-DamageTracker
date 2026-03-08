@@ -1,0 +1,135 @@
+# Damage Tracker
+
+《Slay the Spire 2》伤害统计模组。
+
+这个模组会在战斗界面中显示一个可拖动的伤害统计窗口，用于实时查看每位玩家在当前 Run 中的输出情况。
+
+## 功能
+
+- 显示每位玩家的总伤害
+- 显示当前战斗伤害
+- 显示最近一次命中伤害
+- 窗口支持鼠标拖动
+- 优先尝试显示平台玩家名称
+- 战斗开始和结束时自动刷新状态
+
+## 安装方式
+
+将模组所需文件放入游戏根目录的 `mods` 目录中。（若没有则需要新建）
+
+需要：
+
+- `DamageTracker.dll`
+- `DamageTracker.pck`
+
+## 使用说明
+
+- 进入战斗后，屏幕上会出现伤害统计窗口
+- 按住窗口左键可以拖动位置
+- 窗口会显示当前 Run、当前战斗状态和玩家伤害统计
+
+## 技术实现
+
+- 使用 Harmony 给游戏 Hook 打补丁
+- 监听 `BeforeCombatStart`
+- 监听 `AfterCombatEnd`
+- 监听 `AfterPlayerTurnStart`
+- 监听 `AfterDamageGiven`
+- 使用 Godot `CanvasLayer` 渲染覆盖层 UI
+
+## 环境要求
+
+- Windows
+- .NET 9 SDK
+- Godot .NET SDK 4.5.1
+- 已安装《Slay the Spire 2》
+
+## 项目结构
+
+- `ModEntry.cs`：模组入口与 Hook 补丁注册
+- `RunDamageTrackerService.cs`：伤害统计逻辑
+- `ReflectionHelpers.cs`：运行时反射辅助与玩家信息解析
+- `DamageTrackerOverlay.cs`：战斗界面覆盖层 UI
+- `mod_manifest.json`：模组清单
+- `project.godot`：Godot 项目配置
+- `DamageTracker.csproj`：C# 项目配置
+
+## 使用前配置
+
+构建前需要先修改 `DamageTracker.csproj` 中的游戏目录：
+
+```xml
+<Sts2Dir>C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2</Sts2Dir>
+```
+
+如果你的游戏不在这个位置，请改成自己的安装目录。
+
+项目会从下面目录引用游戏程序集：
+
+```text
+$(Sts2Dir)\data_sts2_windows_x86_64
+```
+
+依赖的程序集包括：
+
+- `sts2.dll`
+- `0Harmony.dll`
+- `Steamworks.NET.dll`
+
+## 构建
+
+在仓库根目录执行：
+
+```powershell
+dotnet build
+```
+
+构建成功后会生成：
+
+```text
+.godot/mono/temp/bin/Debug/DamageTracker.dll
+```
+
+项目里还配置了自动复制逻辑，会尝试把生成的 DLL 复制到游戏目录下的：
+
+```text
+Slay the Spire 2\mods\DamageTracker\
+```
+
+
+## 常见问题
+
+### 1. 构建失败，提示找不到游戏 DLL
+
+检查 `DamageTracker.csproj` 中的 `Sts2Dir` 是否配置正确。
+
+### 2. 构建失败，提示目标 DLL 被占用
+
+如果游戏正在运行，`DamageTracker.dll` 可能会被 `SlayTheSpire2.exe` 锁定。关闭游戏后重新构建即可。
+
+### 3. 玩家名没有按预期显示
+
+当前名称显示依赖运行时对象解析和平台名称接口。如果游戏更新后对象结构变化，可能需要调整 `ReflectionHelpers.cs` 中的反射逻辑。
+
+### 4. UI 位置或样式不符合预期
+
+可以在 `DamageTrackerOverlay.cs` 中调整窗口尺寸、配色和布局。
+
+## 开发说明
+
+这个项目是源码学习和模组开发练习用途。上传 GitHub 时建议保留源码、配置文件和清单文件，不要提交构建缓存与本地临时文件。
+
+当前仓库已经通过 `.gitignore` 忽略了以下内容：
+
+- `.godot/`
+- `bin/`
+- `obj/`
+- `.vs/`
+- `*.dll`
+- `*.pck`
+
+## 许可证
+
+本项目采用 MIT License，详见 [LICENSE](LICENSE)。
+
+说明：该许可证适用于本仓库中的模组源码与自定义资源，不适用于游戏本体资源、游戏商业内容或第三方受限内容。
