@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using Godot;
 using MegaCrit.Sts2.Core.Platform;
 
 namespace DamageTracker;
@@ -33,6 +34,37 @@ internal static class ReflectionHelpers
         "CharacterName",
         "Name",
         "LocalizedName"
+    };
+
+    private static readonly string[] CharacterLinks =
+    {
+        "Character",
+        "CharacterModel",
+        "SelectedCharacter"
+    };
+
+    private static readonly string[] CharacterIdMembers =
+    {
+        "Entry",
+        "Id",
+        "CharacterId"
+    };
+
+    private static readonly string[] CharacterTitleMembers =
+    {
+        "Title",
+        "Name",
+        "LocalizedName",
+        "CharacterName"
+    };
+
+    private static readonly string[] PortraitMembers =
+    {
+        "CharacterSelectIcon",
+        "IconTexture",
+        "IconOutlineTexture",
+        "Portrait",
+        "Avatar"
     };
 
     private static readonly string[] DamageMembers =
@@ -68,6 +100,29 @@ internal static class ReflectionHelpers
         return $"run-{RuntimeHelpers.GetHashCode(runState)}";
     }
 
+    /// <summary>
+    /// Resolves a stable run identifier that survives save &amp; quit.
+    /// Uses Seed (which is constant for a given run) rather than object identity.
+    /// </summary>
+    public static string ResolveStableRunId(object? runState)
+    {
+        if (runState == null) return string.Empty;
+
+        // Seed is the most stable identifier for a run
+        foreach (string memberName in new[] { "Seed", "RunId" })
+        {
+            object? value = TryGetMemberValue(runState, memberName);
+            if (value != null)
+            {
+                string text = value.ToString() ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(text) && !LooksLikeTypeName(text))
+                    return text;
+            }
+        }
+
+        return string.Empty;
+    }
+
     public static bool TryResolvePlayerHandle(object? source, out PlayerHandle handle)
     {
         if (source == null)
@@ -87,8 +142,10 @@ internal static class ReflectionHelpers
         string displayName = TryGetPlatformDisplayName(playerKey)
             ?? TryGetDisplayName(playerCandidate)
             ?? $"Player {playerKey}";
+        string? characterName = TryGetCharacterName(playerCandidate);
+        Texture2D? portraitTexture = TryGetCharacterPortrait(playerCandidate);
 
-        handle = new PlayerHandle(playerKey, displayName);
+        handle = new PlayerHandle(playerKey, displayName, characterName, portraitTexture);
         return true;
     }
 
@@ -199,6 +256,72 @@ internal static class ReflectionHelpers
         return null;
     }
 
+    private static string? TryGetCharacterName(object source)
+    {
+        object? character = TryGetCharacter(source);
+        if (character == null)
+        {
+            return null;
+        }
+
+        object? idObject = TryGetMemberValue(character, "Id");
+        if (idObject != null)
+        {
+            foreach (string memberName in CharacterIdMembers)
+            {
+                string? idText = TryGetMemberValue(idObject, memberName)?.ToString();
+                if (!string.IsNullOrWhiteSpace(idText) && !LooksLikeTypeName(idText))
+                {
+                    return idText;
+                }
+            }
+        }
+
+        foreach (string memberName in CharacterTitleMembers)
+        {
+            string? titleText = TryGetMemberValue(character, memberName)?.ToString();
+            if (!string.IsNullOrWhiteSpace(titleText) && !LooksLikeTypeName(titleText))
+            {
+                return titleText;
+            }
+        }
+
+        return null;
+    }
+
+    private static Texture2D? TryGetCharacterPortrait(object source)
+    {
+        object? character = TryGetCharacter(source);
+        if (character == null)
+        {
+            return null;
+        }
+
+        foreach (string memberName in PortraitMembers)
+        {
+            if (TryGetMemberValue(character, memberName) is Texture2D texture)
+            {
+                return texture;
+            }
+        }
+
+        return null;
+    }
+
+    private static object? TryGetCharacter(object source)
+    {
+        foreach (string memberName in CharacterLinks)
+        {
+            object? character = TryGetMemberValue(source, memberName);
+            if (character != null)
+            {
+                return character;
+            }
+        }
+
+        return null;
+    }
+
     private static string? TryGetPlatformDisplayName(ulong playerKey)
     {
         try
@@ -258,6 +381,11 @@ internal static class ReflectionHelpers
         }
 
         return null;
+    }
+
+    private static bool LooksLikeTypeName(string value)
+    {
+        return value.Contains('.', StringComparison.Ordinal) || value.Contains('+', StringComparison.Ordinal);
     }
 
     private static bool TryConvertToDecimal(object? value, out decimal amount)

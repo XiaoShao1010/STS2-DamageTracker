@@ -2,29 +2,51 @@ using Godot;
 
 namespace DamageTracker;
 
+/// <summary>
+/// Flat, table-style damage overlay. Simple colors, clear columns, no overlap.
+/// </summary>
 public sealed partial class DamageTrackerOverlay : CanvasLayer
 {
+    // ── Palette (keep it minimal) ──────────────────────────────
+    private static readonly Color White = new("FFFFFF");
+    private static readonly Color Gray = new("A0A8B4");
+    private static readonly Color DimGray = new("687480");
+    private static readonly Color Green = new("4ADE80");
+    private static readonly Color Red = new("F87171");
+    private static readonly Color Yellow = new("FACC15");
+    private static readonly Color Cyan = new("22D3EE");
+    private static readonly Color BgDark = new("000000B0");
+    private static readonly Color BgRow = new("FFFFFF10");
+    private static readonly Color BgActiveRow = new("4ADE8018");
+    private static readonly Color Border = new("3A3A5C");
+    private static readonly Color BorderActive = new("4ADE80");
+
+    // Character theme colors based on their visual identity
+    private static readonly Dictionary<string, Color> CharTheme = new(System.StringComparer.OrdinalIgnoreCase)
+    {
+        ["ironclad"]    = new Color("E05050"),  // red
+        ["silent"]      = new Color("5DB85D"),  // green
+        ["defect"]      = new Color("4AA8D8"),  // blue
+        ["necrobinder"] = new Color("B060D0"),  // purple
+        ["regent"]      = new Color("D8A030"),  // gold/orange
+    };
+
+    private static readonly Dictionary<string, Texture2D?> IconCache = new(System.StringComparer.OrdinalIgnoreCase);
+
     private static DamageTrackerOverlay? _instance;
 
     private Control? _root;
-    private Label? _statusLabel;
-    private PanelContainer? _statusBadge;
-    private RichTextLabel? _text;
+    private Label? _headerStatus;
+    private Label? _metaLabel;
+    private VBoxContainer? _rows;
+    private Label? _emptyLabel;
     private bool _isDragging;
     private Vector2 _dragOffset;
 
     public static void EnsureCreated()
     {
-        if (IsInstanceValid(_instance))
-        {
-            return;
-        }
-
-        if (Engine.GetMainLoop() is not SceneTree tree || tree.Root == null)
-        {
-            return;
-        }
-
+        if (IsInstanceValid(_instance)) return;
+        if (Engine.GetMainLoop() is not SceneTree tree || tree.Root == null) return;
         _instance = new DamageTrackerOverlay();
         tree.Root.CallDeferred(Node.MethodName.AddChild, _instance);
     }
@@ -33,16 +55,13 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     {
         Layer = 100;
         Name = nameof(DamageTrackerOverlay);
-        RunDamageTrackerService.Changed += OnTrackerChanged;
+        RunDamageTrackerService.Changed += OnChanged;
     }
 
     public override void _ExitTree()
     {
-        RunDamageTrackerService.Changed -= OnTrackerChanged;
-        if (ReferenceEquals(_instance, this))
-        {
-            _instance = null;
-        }
+        RunDamageTrackerService.Changed -= OnChanged;
+        if (ReferenceEquals(_instance, this)) _instance = null;
     }
 
     public override void _Ready()
@@ -51,313 +70,414 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         {
             Name = "Root",
             MouseFilter = Control.MouseFilterEnum.Pass,
-            AnchorLeft = 0,
-            AnchorTop = 0,
-            AnchorRight = 0,
-            AnchorBottom = 0,
-            OffsetLeft = 24,
-            OffsetTop = 24,
-            OffsetRight = 388,
-            OffsetBottom = 284,
-            CustomMinimumSize = new Vector2(364, 260)
+            OffsetLeft = 16, OffsetTop = 16,
+            OffsetRight = 460, OffsetBottom = 300,
+            CustomMinimumSize = new Vector2(440, 0)
         };
 
-        PanelContainer panel = new()
+        // Background panel
+        PanelContainer bg = new()
         {
             MouseFilter = Control.MouseFilterEnum.Stop,
-            Modulate = Colors.White,
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ExpandFill
+            SizeFlagsVertical = Control.SizeFlags.ShrinkBegin
         };
-        panel.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        panel.GuiInput += OnPanelGuiInput;
-        panel.AddThemeStyleboxOverride("panel", CreatePanelStyle());
-
-        MarginContainer margin = new();
-        margin.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        margin.AddThemeConstantOverride("margin_left", 14);
-        margin.AddThemeConstantOverride("margin_top", 14);
-        margin.AddThemeConstantOverride("margin_right", 14);
-        margin.AddThemeConstantOverride("margin_bottom", 14);
-
-        VBoxContainer stack = new()
+        bg.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        bg.GuiInput += OnGuiInput;
+        bg.AddThemeStyleboxOverride("panel", new StyleBoxFlat
         {
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ExpandFill
-        };
-        stack.AddThemeConstantOverride("separation", 10);
+            BgColor = BgDark,
+            CornerRadiusTopLeft = 6, CornerRadiusTopRight = 6,
+            CornerRadiusBottomLeft = 6, CornerRadiusBottomRight = 6
+        });
 
-        PanelContainer titleBar = new()
-        {
-            MouseFilter = Control.MouseFilterEnum.Ignore,
-            CustomMinimumSize = new Vector2(0, 42)
-        };
-        titleBar.AddThemeStyleboxOverride("panel", CreateTitleBarStyle());
+        // Outer margin
+        MarginContainer pad = new();
+        pad.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        foreach (string side in new[] { "margin_left", "margin_right" })
+            pad.AddThemeConstantOverride(side, 10);
+        foreach (string side in new[] { "margin_top", "margin_bottom" })
+            pad.AddThemeConstantOverride(side, 8);
 
-        MarginContainer titleMargin = new();
-        titleMargin.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        titleMargin.AddThemeConstantOverride("margin_left", 12);
-        titleMargin.AddThemeConstantOverride("margin_top", 8);
-        titleMargin.AddThemeConstantOverride("margin_right", 12);
-        titleMargin.AddThemeConstantOverride("margin_bottom", 8);
+        VBoxContainer col = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        col.AddThemeConstantOverride("separation", 4);
 
-        HBoxContainer titleRow = new()
-        {
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            Alignment = BoxContainer.AlignmentMode.Begin
-        };
-        titleRow.AddThemeConstantOverride("separation", 8);
+        // ── Header row: title + status ──
+        col.AddChild(BuildHeader());
 
-        Label title = new()
-        {
-            Text = "Damage Tracker",
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        title.AddThemeFontSizeOverride("font_size", 18);
-        title.AddThemeColorOverride("font_color", new Color("F7FBFF"));
+        // ── Meta line ──
+        _metaLabel = MakeLabel("Run - | Combat #0 | Players 0", 11, DimGray);
+        col.AddChild(_metaLabel);
 
-        _statusBadge = new PanelContainer
-        {
-            MouseFilter = Control.MouseFilterEnum.Ignore,
-            CustomMinimumSize = new Vector2(62, 26)
-        };
-        _statusBadge.AddThemeStyleboxOverride("panel", CreateStatusStyle(new Color("2F5E47"), new Color("7BE0A8")));
+        // ── Column headings ──
+        col.AddChild(BuildColumnHeadings());
 
-        _statusLabel = new Label
-        {
-            Text = "IDLE",
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        _statusLabel.AddThemeFontSizeOverride("font_size", 12);
-        _statusLabel.AddThemeColorOverride("font_color", new Color("E8FFF1"));
-        _statusBadge.AddChild(_statusLabel);
+        // ── Thin separator ──
+        col.AddChild(HLine());
 
-        titleRow.AddChild(title);
-        titleRow.AddChild(_statusBadge);
-        titleMargin.AddChild(titleRow);
-        titleBar.AddChild(titleMargin);
+        // ── Player rows ──
+        _rows = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _rows.AddThemeConstantOverride("separation", 2);
+        col.AddChild(_rows);
 
-        Label hint = new()
-        {
-            Text = "Drag to move",
-            HorizontalAlignment = HorizontalAlignment.Left,
-            MouseFilter = Control.MouseFilterEnum.Ignore
-        };
-        hint.AddThemeFontSizeOverride("font_size", 11);
-        hint.AddThemeColorOverride("font_color", new Color("90A5BC"));
+        // ── Empty hint ──
+        _emptyLabel = MakeLabel("Waiting for damage events ...", 12, DimGray);
+        _emptyLabel.HorizontalAlignment = HorizontalAlignment.Center;
+        col.AddChild(_emptyLabel);
 
-        _text = new RichTextLabel
-        {
-            BbcodeEnabled = true,
-            FitContent = false,
-            ScrollActive = false,
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
-            MouseFilter = Control.MouseFilterEnum.Ignore,
-            AutowrapMode = TextServer.AutowrapMode.WordSmart,
-            Text = RunDamageTrackerService.BuildOverlayText()
-        };
-        _text.AddThemeFontSizeOverride("normal_font_size", 13);
-        _text.AddThemeColorOverride("default_color", new Color("EAF2FF"));
-
-        PanelContainer body = new()
-        {
-            MouseFilter = Control.MouseFilterEnum.Ignore,
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            SizeFlagsVertical = Control.SizeFlags.ExpandFill
-        };
-        body.AddThemeStyleboxOverride("panel", CreateBodyStyle());
-
-        MarginContainer bodyMargin = new();
-        bodyMargin.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        bodyMargin.AddThemeConstantOverride("margin_left", 12);
-        bodyMargin.AddThemeConstantOverride("margin_top", 12);
-        bodyMargin.AddThemeConstantOverride("margin_right", 12);
-        bodyMargin.AddThemeConstantOverride("margin_bottom", 12);
-
-        bodyMargin.AddChild(_text);
-        body.AddChild(bodyMargin);
-
-        stack.AddChild(titleBar);
-        stack.AddChild(hint);
-        stack.AddChild(body);
-        margin.AddChild(stack);
-        panel.AddChild(margin);
-        _root.AddChild(panel);
+        pad.AddChild(col);
+        bg.AddChild(pad);
+        _root.AddChild(bg);
         AddChild(_root);
 
-        UpdateStatus(RunDamageTrackerService.BuildOverlayText());
+        ApplyState(RunDamageTrackerService.BuildOverlayState());
     }
+
+    // ── Header ─────────────────────────────────────────────────
+
+    private Control BuildHeader()
+    {
+        HBoxContainer h = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        h.AddThemeConstantOverride("separation", 0);
+
+        Label title = MakeLabel("Damage Tracker", 15, White);
+        title.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+
+        _headerStatus = MakeLabel("IDLE", 11, DimGray);
+        _headerStatus.HorizontalAlignment = HorizontalAlignment.Right;
+
+        h.AddChild(title);
+        h.AddChild(_headerStatus);
+        return h;
+    }
+
+    // ── Column headings ────────────────────────────────────────
+
+    private static Control BuildColumnHeadings()
+    {
+        HBoxContainer h = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        h.AddThemeConstantOverride("separation", 0);
+
+        // Icon spacer (40px to match avatar)
+        h.AddChild(Spacer(40));
+        h.AddChild(HeadLabel("Player", true));
+        h.AddChild(HeadLabel("%", false, 38));
+        h.AddChild(HeadLabel("Total", false, 62));
+        h.AddChild(HeadLabel("Combat", false, 62));
+        h.AddChild(HeadLabel("Last", false, 52));
+        h.AddChild(HeadLabel("Max", false, 52));
+        return h;
+    }
+
+    // ── Player row ─────────────────────────────────────────────
+
+    private Control CreateRow(PlayerDamageSnapshot snap, float ratio)
+    {
+        bool active = snap.IsActive;
+        Color theme = GetCharTheme(snap.CharacterName);
+
+        PanelContainer card = new()
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0, 40)
+        };
+        card.AddThemeStyleboxOverride("panel", new StyleBoxFlat
+        {
+            BgColor = new Color(theme, active ? 0.18f : 0.08f),
+            BorderColor = active ? new Color(theme, 0.9f) : new Color(theme, 0.3f),
+            BorderWidthLeft = 3,
+            BorderWidthTop = 0, BorderWidthRight = 0, BorderWidthBottom = 0,
+            CornerRadiusTopLeft = 4, CornerRadiusTopRight = 4,
+            CornerRadiusBottomLeft = 4, CornerRadiusBottomRight = 4
+        });
+
+        MarginContainer mp = new();
+        mp.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        mp.AddThemeConstantOverride("margin_left", 6);
+        mp.AddThemeConstantOverride("margin_right", 6);
+        mp.AddThemeConstantOverride("margin_top", 4);
+        mp.AddThemeConstantOverride("margin_bottom", 4);
+
+        HBoxContainer row = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        row.AddThemeConstantOverride("separation", 0);
+
+        // Avatar 32x32
+        row.AddChild(BuildAvatar(snap, 32));
+        row.AddChild(Spacer(8));
+
+        // Name + character stacked
+        VBoxContainer nameCol = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        nameCol.AddThemeConstantOverride("separation", 0);
+
+        Label nameLabel = MakeLabel(snap.DisplayName, 13, active ? theme.Lightened(0.3f) : White);
+        nameLabel.ClipText = true;
+        nameLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+
+        Label charLabel = MakeLabel(snap.CharacterName, 10, new Color(theme, 0.7f));
+        charLabel.ClipText = true;
+
+        nameCol.AddChild(nameLabel);
+        nameCol.AddChild(charLabel);
+        row.AddChild(nameCol);
+
+        // Percentage label
+        int pct = (int)(ratio * 100f);
+        row.AddChild(StatCell($"{pct}%", new Color(theme, 0.9f), 38));
+
+        // Stat columns — right-aligned, fixed width
+        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.TotalDamage), Yellow, 62));
+        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.CombatDamage), Cyan, 62));
+        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.LastDamage), Red, 52));
+        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.MaxHitDamage), new Color("FF79C6"), 52));
+
+        mp.AddChild(row);
+
+        // ── Damage share bar ──
+        Control barBg = new()
+        {
+            CustomMinimumSize = new Vector2(0, 3),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            MouseFilter = Control.MouseFilterEnum.Ignore
+        };
+
+        ColorRect barTrack = new()
+        {
+            Color = new Color("FFFFFF0A"),
+            MouseFilter = Control.MouseFilterEnum.Ignore
+        };
+        barTrack.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+
+        ColorRect barFill = new()
+        {
+            Color = new Color(theme, 0.6f),
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+            AnchorLeft = 0, AnchorTop = 0,
+            AnchorRight = Mathf.Clamp(ratio, 0f, 1f),
+            AnchorBottom = 1,
+            OffsetLeft = 0, OffsetTop = 0, OffsetRight = 0, OffsetBottom = 0
+        };
+
+        barBg.AddChild(barTrack);
+        barBg.AddChild(barFill);
+
+        VBoxContainer cardContent = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        cardContent.AddThemeConstantOverride("separation", 0);
+        cardContent.AddChild(mp);
+        cardContent.AddChild(barBg);
+
+        card.AddChild(cardContent);
+
+        // Flash animation on update
+        card.Modulate = new Color(1, 1, 1, 0.3f);
+        card.TreeEntered += () =>
+        {
+            Tween? tw = card.CreateTween();
+            tw?.TweenProperty(card, "modulate", new Color(1, 1, 1, 1), 0.35f)
+               .SetTrans(Tween.TransitionType.Cubic)
+               .SetEase(Tween.EaseType.Out);
+        };
+
+        return card;
+    }
+
+    // ── Avatar ─────────────────────────────────────────────────
+
+    private static Control BuildAvatar(PlayerDamageSnapshot snap, int size)
+    {
+        Texture2D? tex = LoadIcon(snap.CharacterName) ?? snap.PortraitTexture;
+
+        if (tex != null)
+        {
+            TextureRect img = new()
+            {
+                Texture = tex,
+                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                CustomMinimumSize = new Vector2(size, size),
+                SizeFlagsVertical = Control.SizeFlags.ShrinkCenter
+            };
+            return img;
+        }
+
+        // Colored square fallback with initials
+        PanelContainer frame = new()
+        {
+            CustomMinimumSize = new Vector2(size, size),
+            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter
+        };
+        frame.AddThemeStyleboxOverride("panel", new StyleBoxFlat
+        {
+            BgColor = Color.FromHsv((snap.PlayerKey % 360) / 360f, 0.4f, 0.5f),
+            CornerRadiusTopLeft = 4, CornerRadiusTopRight = 4,
+            CornerRadiusBottomLeft = 4, CornerRadiusBottomRight = 4
+        });
+
+        CenterContainer cc = new();
+        cc.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        Label ini = MakeLabel(Initials(snap), 12, White);
+        cc.AddChild(ini);
+        frame.AddChild(cc);
+        return frame;
+    }
+
+    // ── State update ───────────────────────────────────────────
+
+    private void OnChanged(OverlayState s)
+    {
+        if (!IsInsideTree()) return;
+        Callable.From(() => ApplyState(s)).CallDeferred();
+    }
+
+    private void ApplyState(OverlayState s)
+    {
+        if (_headerStatus == null || _metaLabel == null || _rows == null || _emptyLabel == null) return;
+
+        bool live = s.CombatActive;
+        _headerStatus.Text = live ? "LIVE" : "IDLE";
+        _headerStatus.AddThemeColorOverride("font_color", live ? Green : DimGray);
+
+        _metaLabel.Text = $"Run {s.RunToken} | Combat #{s.CombatIndex} | Players {s.Players.Count}";
+
+        foreach (Node c in _rows.GetChildren()) c.QueueFree();
+
+        _emptyLabel.Visible = s.Players.Count == 0;
+
+        decimal teamTotal = 0;
+        for (int i = 0; i < s.Players.Count; i++)
+            teamTotal += s.Players[i].TotalDamage;
+
+        for (int i = 0; i < s.Players.Count; i++)
+        {
+            float ratio = teamTotal > 0 ? (float)(s.Players[i].TotalDamage / teamTotal) : 0f;
+            _rows.AddChild(CreateRow(s.Players[i], ratio));
+        }
+    }
+
+    // ── Drag ───────────────────────────────────────────────────
 
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (!_isDragging)
-        {
-            return;
-        }
-
-        if (@event is InputEventMouseButton mouseButton && !mouseButton.Pressed && mouseButton.ButtonIndex == MouseButton.Left)
-        {
+        if (_isDragging && @event is InputEventMouseButton mb && !mb.Pressed && mb.ButtonIndex == MouseButton.Left)
             _isDragging = false;
-        }
     }
 
-    private void OnTrackerChanged(string text)
+    private void OnGuiInput(InputEvent @event)
     {
-        if (!IsInsideTree())
-        {
-            return;
-        }
-
-        Callable.From(() => ApplyText(text)).CallDeferred();
-    }
-
-    private void ApplyText(string text)
-    {
-        if (_text != null)
-        {
-            _text.Text = text;
-        }
-
-        UpdateStatus(text);
-    }
-
-    private void OnPanelGuiInput(InputEvent @event)
-    {
-        if (_root == null)
-        {
-            return;
-        }
-
+        if (_root == null) return;
         switch (@event)
         {
-            case InputEventMouseButton mouseButton when mouseButton.ButtonIndex == MouseButton.Left:
-                if (mouseButton.Pressed)
+            case InputEventMouseButton mb when mb.ButtonIndex == MouseButton.Left:
+                if (mb.Pressed)
                 {
                     _isDragging = true;
                     _dragOffset = GetViewport().GetMousePosition() - _root.Position;
                     GetViewport().SetInputAsHandled();
                 }
-                else
-                {
-                    _isDragging = false;
-                }
+                else _isDragging = false;
                 break;
-
             case InputEventMouseMotion when _isDragging:
-                UpdateRootPosition(GetViewport().GetMousePosition() - _dragOffset);
+                ClampPos(GetViewport().GetMousePosition() - _dragOffset);
                 GetViewport().SetInputAsHandled();
                 break;
         }
     }
 
-    private void UpdateRootPosition(Vector2 desiredPosition)
+    private void ClampPos(Vector2 p)
     {
-        if (_root == null)
-        {
-            return;
-        }
-
-        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
-        Vector2 panelSize = _root.Size;
-        float maxX = Mathf.Max(0f, viewportSize.X - panelSize.X);
-        float maxY = Mathf.Max(0f, viewportSize.Y - panelSize.Y);
-
+        if (_root == null) return;
+        Vector2 vp = GetViewport().GetVisibleRect().Size;
+        Vector2 sz = _root.Size;
         _root.Position = new Vector2(
-            Mathf.Clamp(desiredPosition.X, 0f, maxX),
-            Mathf.Clamp(desiredPosition.Y, 0f, maxY));
+            Mathf.Clamp(p.X, 0, Mathf.Max(0, vp.X - sz.X)),
+            Mathf.Clamp(p.Y, 0, Mathf.Max(0, vp.Y - sz.Y)));
     }
 
-    private void UpdateStatus(string text)
+    // ── Icon loader ────────────────────────────────────────────
+
+    private static Texture2D? LoadIcon(string? name)
     {
-        if (_statusLabel == null || _statusBadge == null)
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        string key = name.Trim().ToLowerInvariant().Replace(' ', '_');
+        if (IconCache.TryGetValue(key, out Texture2D? t)) return t;
+        string path = $"res://images/ui/top_panel/character_icon_{key}.png";
+        t = ResourceLoader.Exists(path) ? ResourceLoader.Load<Texture2D>(path) : null;
+        IconCache[key] = t;
+        return t;
+    }
+
+    // ── Tiny helpers ───────────────────────────────────────────
+
+    private static Label MakeLabel(string text, int size, Color color)
+    {
+        Label l = new()
         {
-            return;
+            Text = text,
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        l.AddThemeFontSizeOverride("font_size", size);
+        l.AddThemeColorOverride("font_color", color);
+        return l;
+    }
+
+    private static Control HeadLabel(string text, bool expand, int width = 0)
+    {
+        Label l = MakeLabel(text, 10, DimGray);
+        if (expand)
+        {
+            l.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+            l.ClipText = true;
         }
-
-        bool isLive = text.Contains("(live)", StringComparison.OrdinalIgnoreCase);
-        _statusLabel.Text = isLive ? "LIVE" : "IDLE";
-        _statusBadge.AddThemeStyleboxOverride(
-            "panel",
-            isLive
-                ? CreateStatusStyle(new Color("2F5E47"), new Color("7BE0A8"))
-                : CreateStatusStyle(new Color("4E4359"), new Color("C7B0FF")));
+        else
+        {
+            l.CustomMinimumSize = new Vector2(width, 0);
+            l.HorizontalAlignment = HorizontalAlignment.Right;
+        }
+        return l;
     }
 
-    private static StyleBoxFlat CreatePanelStyle()
+    private static Control StatCell(string val, Color color, int width)
     {
-        return new StyleBoxFlat
-        {
-            BgColor = new Color("0F1725E8"),
-            BorderColor = new Color("38506EFF"),
-            BorderWidthLeft = 1,
-            BorderWidthTop = 1,
-            BorderWidthRight = 1,
-            BorderWidthBottom = 1,
-            CornerRadiusTopLeft = 16,
-            CornerRadiusTopRight = 16,
-            CornerRadiusBottomRight = 16,
-            CornerRadiusBottomLeft = 16,
-            ShadowColor = new Color("0000006A"),
-            ShadowSize = 14,
-            ExpandMarginLeft = 2,
-            ExpandMarginTop = 2,
-            ExpandMarginRight = 2,
-            ExpandMarginBottom = 2
-        };
+        Label l = MakeLabel(val, 13, color);
+        l.CustomMinimumSize = new Vector2(width, 0);
+        l.HorizontalAlignment = HorizontalAlignment.Right;
+        return l;
     }
 
-    private static StyleBoxFlat CreateTitleBarStyle()
+    private static Control Spacer(int w)
     {
-        return new StyleBoxFlat
-        {
-            BgColor = new Color("182335FF"),
-            BorderColor = new Color("5476A1FF"),
-            BorderWidthBottom = 1,
-            CornerRadiusTopLeft = 12,
-            CornerRadiusTopRight = 12,
-            CornerRadiusBottomRight = 10,
-            CornerRadiusBottomLeft = 10
-        };
+        Control c = new() { CustomMinimumSize = new Vector2(w, 0), MouseFilter = Control.MouseFilterEnum.Ignore };
+        return c;
     }
 
-    private static StyleBoxFlat CreateBodyStyle()
+    private static Control HLine()
     {
-        return new StyleBoxFlat
+        ColorRect r = new()
         {
-            BgColor = new Color("101927CC"),
-            BorderColor = new Color("243548FF"),
-            BorderWidthLeft = 1,
-            BorderWidthTop = 1,
-            BorderWidthRight = 1,
-            BorderWidthBottom = 1,
-            CornerRadiusTopLeft = 12,
-            CornerRadiusTopRight = 12,
-            CornerRadiusBottomRight = 12,
-            CornerRadiusBottomLeft = 12
+            Color = Border,
+            CustomMinimumSize = new Vector2(0, 1),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            MouseFilter = Control.MouseFilterEnum.Ignore
         };
+        return r;
     }
 
-    private static StyleBoxFlat CreateStatusStyle(Color background, Color border)
+    private static Color GetCharTheme(string? charName)
     {
-        return new StyleBoxFlat
+        if (!string.IsNullOrWhiteSpace(charName))
         {
-            BgColor = background,
-            BorderColor = border,
-            BorderWidthLeft = 1,
-            BorderWidthTop = 1,
-            BorderWidthRight = 1,
-            BorderWidthBottom = 1,
-            CornerRadiusTopLeft = 999,
-            CornerRadiusTopRight = 999,
-            CornerRadiusBottomRight = 999,
-            CornerRadiusBottomLeft = 999,
-            ContentMarginLeft = 8,
-            ContentMarginTop = 4,
-            ContentMarginRight = 8,
-            ContentMarginBottom = 4
-        };
+            string key = charName.Trim().ToLowerInvariant().Replace(' ', '_');
+            if (CharTheme.TryGetValue(key, out Color c)) return c;
+        }
+        return Gray;
+    }
+
+    private static string Initials(PlayerDamageSnapshot s)
+    {
+        string src = !string.IsNullOrWhiteSpace(s.CharacterName) ? s.CharacterName : s.DisplayName;
+        string[] p = src.Split(new[] { ' ', '-', '_' }, System.StringSplitOptions.RemoveEmptyEntries);
+        if (p.Length == 0) return "?";
+        if (p.Length == 1) return p[0].Length >= 2 ? p[0][..2].ToUpperInvariant() : p[0].ToUpperInvariant();
+        return string.Concat(p[0][0], p[1][0]).ToUpperInvariant();
     }
 }

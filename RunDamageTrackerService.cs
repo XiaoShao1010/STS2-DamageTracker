@@ -1,5 +1,6 @@
 using System.Globalization;
-using System.Text;
+using System.Text.Json;
+using Godot;
 
 namespace DamageTracker;
 
@@ -7,28 +8,51 @@ public static class RunDamageTrackerService
 {
     private static readonly object SyncRoot = new();
     private static readonly Dictionary<ulong, PlayerDamageSnapshot> Totals = new();
+    private static readonly string SavePath = ProjectSettings.GlobalizePath("user://damage_tracker_state.json");
 
     private static string? _currentRunToken;
+    private static string? _stableRunId;
     private static int _combatIndex;
     private static bool _combatActive;
+    private static ulong? _activePlayerKey;
 
-    public static event Action<string>? Changed;
+    public static event Action<OverlayState>? Changed;
 
     public static void BeginRun(object? runState)
     {
         string nextToken = ReflectionHelpers.ResolveRunToken(runState);
+        string stableId = ReflectionHelpers.ResolveStableRunId(runState);
 
         lock (SyncRoot)
         {
+            // Same token in memory — skip
             if (string.Equals(_currentRunToken, nextToken, StringComparison.Ordinal))
+                return;
+
+            // Same stable ID (e.g. after save & quit) — keep accumulated data
+            if (!string.IsNullOrEmpty(stableId) &&
+                string.Equals(_stableRunId, stableId, StringComparison.Ordinal))
             {
+                _currentRunToken = nextToken;
                 return;
             }
 
+            // Try restoring from disk if stable ID matches
+            if (!string.IsNullOrEmpty(stableId) && TryLoadState(stableId))
+            {
+                _currentRunToken = nextToken;
+                _stableRunId = stableId;
+                Publish();
+                return;
+            }
+
+            // Truly new run — reset everything
             Totals.Clear();
             _currentRunToken = nextToken;
+            _stableRunId = stableId;
             _combatIndex = 0;
             _combatActive = false;
+            _activePlayerKey = null;
         }
 
         Publish();
@@ -40,10 +64,12 @@ public static class RunDamageTrackerService
         {
             _combatIndex++;
             _combatActive = combatState != null;
+            _activePlayerKey = null;
 
             foreach (PlayerDamageSnapshot snapshot in Totals.Values)
             {
                 snapshot.CombatDamage = 0m;
+                snapshot.IsActive = false;
             }
         }
 
@@ -55,8 +81,15 @@ public static class RunDamageTrackerService
         lock (SyncRoot)
         {
             _combatActive = false;
+            _activePlayerKey = null;
+
+            foreach (PlayerDamageSnapshot snapshot in Totals.Values)
+            {
+                snapshot.IsActive = false;
+            }
         }
 
+        SaveState();
         Publish();
     }
 
@@ -70,9 +103,12 @@ public static class RunDamageTrackerService
         lock (SyncRoot)
         {
             PlayerDamageSnapshot snapshot = GetOrCreate(handle);
-            if (!string.IsNullOrWhiteSpace(handle.DisplayName))
+            ApplyHandle(snapshot, handle);
+            _activePlayerKey = handle.PlayerKey;
+
+            foreach (PlayerDamageSnapshot playerSnapshot in Totals.Values)
             {
-                snapshot.DisplayName = handle.DisplayName;
+                playerSnapshot.IsActive = playerSnapshot.PlayerKey == handle.PlayerKey;
             }
         }
 
@@ -100,21 +136,25 @@ public static class RunDamageTrackerService
         lock (SyncRoot)
         {
             PlayerDamageSnapshot snapshot = GetOrCreate(handle);
+            ApplyHandle(snapshot, handle);
             snapshot.TotalDamage += damage;
             snapshot.CombatDamage += damage;
             snapshot.LastDamage = damage;
+            if (damage > snapshot.MaxHitDamage)
+                snapshot.MaxHitDamage = damage;
             snapshot.LastUpdatedUtc = DateTime.UtcNow;
         }
 
         Publish();
     }
 
-    public static string BuildOverlayText()
+    public static OverlayState BuildOverlayState()
     {
         List<PlayerDamageSnapshot> snapshots;
         string runToken;
         int combatIndex;
         bool combatActive;
+        ulong? activePlayerKey;
 
         lock (SyncRoot)
         {
@@ -126,48 +166,17 @@ public static class RunDamageTrackerService
             runToken = _currentRunToken ?? "unknown-run";
             combatIndex = _combatIndex;
             combatActive = _combatActive;
+            activePlayerKey = _activePlayerKey;
         }
 
-        StringBuilder builder = new();
-        builder.Append("[color=#93A9C3]RUN[/color]  [b]")
-            .Append(EscapeBbCode(runToken))
-            .AppendLine("[/b]");
-        builder.Append("[color=#93A9C3]COMBAT[/color]  [b]")
-            .Append(combatIndex)
-            .Append(combatActive ? "[/b]  [color=#7BE0A8](live)[/color]" : "[/b]  [color=#C7B0FF](idle)[/color]")
-            .AppendLine();
-        builder.AppendLine();
-
-        if (snapshots.Count == 0)
+        return new OverlayState
         {
-            builder.AppendLine("[color=#EAF2FF]No player damage recorded yet.[/color]");
-            builder.AppendLine("[color=#93A9C3]Damage starts updating after the first hit lands.[/color]");
-            return builder.ToString();
-        }
-
-        for (int index = 0; index < snapshots.Count; index++)
-        {
-            PlayerDamageSnapshot snapshot = snapshots[index];
-            builder.Append("[b]")
-                .Append(index + 1)
-                .Append(". ")
-                .Append(EscapeBbCode(snapshot.DisplayName))
-                .AppendLine("[/b]");
-            builder.Append("[color=#93A9C3]Total[/color] [b]")
-                .Append(Format(snapshot.TotalDamage))
-                .Append("[/b]    [color=#93A9C3]Combat[/color] [b]")
-                .Append(Format(snapshot.CombatDamage))
-                .Append("[/b]    [color=#93A9C3]Last[/color] [b]")
-                .Append(Format(snapshot.LastDamage))
-                .AppendLine("[/b]");
-
-            if (index < snapshots.Count - 1)
-            {
-                builder.AppendLine("[color=#243548]--------------------------------[/color]");
-            }
-        }
-
-        return builder.ToString();
+            RunToken = runToken,
+            CombatIndex = combatIndex,
+            CombatActive = combatActive,
+            ActivePlayerKey = activePlayerKey,
+            Players = snapshots
+        };
     }
 
     private static PlayerDamageSnapshot GetOrCreate(PlayerHandle handle)
@@ -186,20 +195,109 @@ public static class RunDamageTrackerService
         return created;
     }
 
-    private static string Format(decimal value)
+    private static void ApplyHandle(PlayerDamageSnapshot snapshot, PlayerHandle handle)
+    {
+        if (!string.IsNullOrWhiteSpace(handle.DisplayName))
+            snapshot.DisplayName = handle.DisplayName;
+        if (!string.IsNullOrWhiteSpace(handle.CharacterName))
+            snapshot.CharacterName = handle.CharacterName;
+        if (handle.PortraitTexture != null)
+            snapshot.PortraitTexture = handle.PortraitTexture;
+    }
+
+    public static string Format(decimal value)
     {
         return value.ToString("0.##", CultureInfo.InvariantCulture);
     }
 
-    private static string EscapeBbCode(string value)
-    {
-        return value.Replace("[", "[[", StringComparison.Ordinal).Replace("]", "]]", StringComparison.Ordinal);
-    }
-
     private static void Publish()
     {
-        Changed?.Invoke(BuildOverlayText());
+        Changed?.Invoke(BuildOverlayState());
     }
+
+    // ── Persistence ────────────────────────────────────────────
+
+    private static void SaveState()
+    {
+        try
+        {
+            SavedState state;
+            lock (SyncRoot)
+            {
+                if (string.IsNullOrEmpty(_stableRunId)) return;
+
+                state = new SavedState
+                {
+                    StableRunId = _stableRunId,
+                    CombatIndex = _combatIndex,
+                    Players = Totals.Values.Select(s => new SavedPlayer
+                    {
+                        PlayerKey = s.PlayerKey,
+                        DisplayName = s.DisplayName,
+                        CharacterName = s.CharacterName,
+                        TotalDamage = s.TotalDamage,
+                        MaxHitDamage = s.MaxHitDamage
+                    }).ToList()
+                };
+            }
+
+            string json = JsonSerializer.Serialize(state, SavedStateCtx.Default.SavedState);
+            System.IO.File.WriteAllText(SavePath, json);
+        }
+        catch
+        {
+            // Silently ignore save errors
+        }
+    }
+
+    private static bool TryLoadState(string stableId)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(SavePath)) return false;
+
+            string json = System.IO.File.ReadAllText(SavePath);
+            SavedState? state = JsonSerializer.Deserialize(json, SavedStateCtx.Default.SavedState);
+            if (state == null || !string.Equals(state.StableRunId, stableId, StringComparison.Ordinal))
+                return false;
+
+            Totals.Clear();
+            _combatIndex = state.CombatIndex;
+            _combatActive = false;
+            _activePlayerKey = null;
+
+            foreach (SavedPlayer sp in state.Players)
+            {
+                Totals[sp.PlayerKey] = new PlayerDamageSnapshot
+                {
+                    PlayerKey = sp.PlayerKey,
+                    DisplayName = sp.DisplayName,
+                    CharacterName = sp.CharacterName,
+                    TotalDamage = sp.TotalDamage,
+                    MaxHitDamage = sp.MaxHitDamage
+                };
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
+public sealed class OverlayState
+{
+    public string RunToken { get; init; } = "unknown-run";
+
+    public int CombatIndex { get; init; }
+
+    public bool CombatActive { get; init; }
+
+    public ulong? ActivePlayerKey { get; init; }
+
+    public IReadOnlyList<PlayerDamageSnapshot> Players { get; init; } = Array.Empty<PlayerDamageSnapshot>();
 }
 
 public sealed class PlayerDamageSnapshot
@@ -208,11 +306,19 @@ public sealed class PlayerDamageSnapshot
 
     public string DisplayName { get; set; } = "Unknown Player";
 
+    public string CharacterName { get; set; } = "Unknown Character";
+
+    public Texture2D? PortraitTexture { get; set; }
+
+    public bool IsActive { get; set; }
+
     public decimal TotalDamage { get; set; }
 
     public decimal CombatDamage { get; set; }
 
     public decimal LastDamage { get; set; }
+
+    public decimal MaxHitDamage { get; set; }
 
     public DateTime LastUpdatedUtc { get; set; }
 
@@ -222,12 +328,37 @@ public sealed class PlayerDamageSnapshot
         {
             PlayerKey = PlayerKey,
             DisplayName = DisplayName,
+            CharacterName = CharacterName,
+            PortraitTexture = PortraitTexture,
+            IsActive = IsActive,
             TotalDamage = TotalDamage,
             CombatDamage = CombatDamage,
             LastDamage = LastDamage,
+            MaxHitDamage = MaxHitDamage,
             LastUpdatedUtc = LastUpdatedUtc
         };
     }
 }
 
-public readonly record struct PlayerHandle(ulong PlayerKey, string DisplayName);
+public readonly record struct PlayerHandle(ulong PlayerKey, string DisplayName, string? CharacterName, Texture2D? PortraitTexture);
+
+// ── Persistence models ─────────────────────────────────────
+
+public sealed class SavedState
+{
+    public string StableRunId { get; set; } = "";
+    public int CombatIndex { get; set; }
+    public List<SavedPlayer> Players { get; set; } = new();
+}
+
+public sealed class SavedPlayer
+{
+    public ulong PlayerKey { get; set; }
+    public string DisplayName { get; set; } = "";
+    public string CharacterName { get; set; } = "";
+    public decimal TotalDamage { get; set; }
+    public decimal MaxHitDamage { get; set; }
+}
+
+[System.Text.Json.Serialization.JsonSerializable(typeof(SavedState))]
+internal partial class SavedStateCtx : System.Text.Json.Serialization.JsonSerializerContext { }
