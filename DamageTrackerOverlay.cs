@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Godot;
 
 namespace DamageTracker;
@@ -7,6 +8,60 @@ namespace DamageTracker;
 /// </summary>
 public sealed partial class DamageTrackerOverlay : CanvasLayer
 {
+    // ── Localization ───────────────────────────────────────────
+
+    private static Dictionary<string, string>? _locStrings;
+
+    private static Dictionary<string, string> LocStrings => _locStrings ??= LoadLocStrings();
+
+    private static Dictionary<string, string> LoadLocStrings()
+    {
+        string lang = ResolveGameLanguage();
+        string path = $"res://localization/{lang}/damage_tracker.json";
+        if (!Godot.FileAccess.FileExists(path) && lang != "eng")
+            path = "res://localization/eng/damage_tracker.json";
+
+        if (!Godot.FileAccess.FileExists(path))
+            return new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+
+        using Godot.FileAccess file = Godot.FileAccess.Open(path, Godot.FileAccess.ModeFlags.Read);
+        string json = file?.GetAsText() ?? "{}";
+        return JsonSerializer.Deserialize<Dictionary<string, string>>(json)
+               ?? new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveGameLanguage()
+    {
+        try
+        {
+            System.Type? locMgr = System.Type.GetType(
+                "MegaCrit.Sts2.Core.Localization.LocManager, sts2", throwOnError: false);
+            object? inst = locMgr?.GetProperty("Instance",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null);
+            string? lang = inst?.GetType().GetProperty("Language")?.GetValue(inst) as string;
+            if (!string.IsNullOrEmpty(lang)) return lang;
+        }
+        catch { /* fallback below */ }
+
+        // Fallback: map OS locale to STS2 three-letter code
+        string locale = OS.GetLocaleLanguage().ToLowerInvariant();
+        if (locale.StartsWith("zh")) return "zhs";
+        if (locale.StartsWith("ja")) return "jpn";
+        if (locale.StartsWith("ko")) return "kor";
+        if (locale.StartsWith("de")) return "deu";
+        if (locale.StartsWith("fr")) return "fra";
+        if (locale.StartsWith("it")) return "ita";
+        if (locale.StartsWith("pt")) return "ptb";
+        if (locale.StartsWith("ru")) return "rus";
+        if (locale.StartsWith("pl")) return "pol";
+        if (locale.StartsWith("th")) return "tha";
+        if (locale.StartsWith("tr")) return "tur";
+        if (locale.StartsWith("es")) return "esp";
+        return "eng";
+    }
+
+    private static string L(string key) => LocStrings.TryGetValue(key, out string? v) ? v : key;
+
     // ── Palette (keep it minimal) ──────────────────────────────
     private static readonly Color White = new("FFFFFF");
     private static readonly Color Gray = new("A0A8B4");
@@ -36,8 +91,6 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     private static DamageTrackerOverlay? _instance;
 
     private Control? _root;
-    private Label? _headerStatus;
-    private Label? _metaLabel;
     private VBoxContainer? _rows;
     private Label? _emptyLabel;
     private Control? _columnHeadings;
@@ -101,12 +154,8 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         VBoxContainer col = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         col.AddThemeConstantOverride("separation", 4);
 
-        // ── Header row: title + status ──
+        // ── Header row: title + toggle ──
         col.AddChild(BuildHeader());
-
-        // ── Meta line ──
-        _metaLabel = MakeLabel("Run - | Combat #0 | Players 0", 11, DimGray);
-        col.AddChild(_metaLabel);
 
         // ── Column headings ──
         _columnHeadings = BuildColumnHeadings();
@@ -122,7 +171,7 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         col.AddChild(_rows);
 
         // ── Empty hint ──
-        _emptyLabel = MakeLabel("Waiting for damage events ...", 12, DimGray);
+        _emptyLabel = MakeLabel(L("EMPTY"), 12, DimGray);
         _emptyLabel.HorizontalAlignment = HorizontalAlignment.Center;
         col.AddChild(_emptyLabel);
 
@@ -140,11 +189,8 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         HBoxContainer h = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         h.AddThemeConstantOverride("separation", 0);
 
-        Label title = MakeLabel("Damage Tracker", 15, White);
+        Label title = MakeLabel(L("TITLE"), 15, White);
         title.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-
-        _headerStatus = MakeLabel("IDLE", 11, DimGray);
-        _headerStatus.HorizontalAlignment = HorizontalAlignment.Right;
 
         _toggleBtn = new Button
         {
@@ -161,7 +207,6 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         _toggleBtn.Pressed += OnToggle;
 
         h.AddChild(title);
-        h.AddChild(_headerStatus);
         h.AddChild(Spacer(4));
         h.AddChild(_toggleBtn);
         return h;
@@ -176,12 +221,12 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
 
         // Icon spacer (40px to match avatar)
         h.AddChild(Spacer(40));
-        h.AddChild(HeadLabel("Player", true));
-        h.AddChild(HeadLabel("%", false, 38));
-        h.AddChild(HeadLabel("Total", false, 62));
-        h.AddChild(HeadLabel("Combat", false, 62));
-        h.AddChild(HeadLabel("Last", false, 52));
-        h.AddChild(HeadLabel("Max", false, 52));
+        h.AddChild(HeadLabel(L("PLAYER"), true));
+        h.AddChild(HeadLabel(L("PCT"), false, 38));
+        h.AddChild(HeadLabel(L("TOTAL"), false, 62));
+        h.AddChild(HeadLabel(L("COMBAT"), false, 62));
+        h.AddChild(HeadLabel(L("LAST"), false, 52));
+        h.AddChild(HeadLabel(L("MAX"), false, 52));
         return h;
     }
 
@@ -426,20 +471,13 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
 
     private void ApplyState(OverlayState s)
     {
-        if (_headerStatus == null || _metaLabel == null || _rows == null || _emptyLabel == null) return;
+        if (_rows == null || _emptyLabel == null) return;
 
         _lastState = s;
 
-        bool live = s.CombatActive;
-        _headerStatus.Text = live ? "LIVE" : "IDLE";
-        _headerStatus.AddThemeColorOverride("font_color", live ? Green : DimGray);
-
-        // Hide meta, column headings, separator in compact mode
-        _metaLabel.Visible = _expanded;
+        // Hide column headings and separator in compact mode
         if (_columnHeadings != null) _columnHeadings.Visible = _expanded;
         if (_separator != null) _separator.Visible = _expanded;
-
-        _metaLabel.Text = $"Run {s.RunToken} | Combat #{s.CombatIndex} | Players {s.Players.Count}";
 
         foreach (Node c in _rows.GetChildren()) c.QueueFree();
 
