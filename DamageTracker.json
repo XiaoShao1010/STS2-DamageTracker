@@ -1,0 +1,11 @@
+{
+  "id": "DamageTracker",
+  "name": "Damage Tracker",
+  "author": "BAIGUANGMEI",
+  "description": "Tracks each player's total run damage and shows a live overlay.",
+  "version": "v0.2.0",
+  "has_pck": true,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": false
+}
