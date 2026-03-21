@@ -17,9 +17,9 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     private static Dictionary<string, string> LoadLocStrings()
     {
         string lang = ResolveGameLanguage();
-        string path = $"res://localization/{lang}/damage_tracker.json";
+        string path = $"res://assets/localization/{lang}/damage_tracker.json";
         if (!Godot.FileAccess.FileExists(path) && lang != "eng")
-            path = "res://localization/eng/damage_tracker.json";
+            path = "res://assets/localization/eng/damage_tracker.json";
 
         if (!Godot.FileAccess.FileExists(path))
             return new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
@@ -100,14 +100,17 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     private Vector2 _dragOffset;
     private bool _expanded = true;
     private OverlayState? _lastState;
+    private static bool _pendingCreate;
 
-    public static void EnsureCreated()
+    /// <summary>
+    /// Schedule overlay creation on next frame (safe to call from mod init before game loop is ready).
+    /// </summary>
+    public static void ScheduleCreate()
     {
-        if (IsInstanceValid(_instance)) return;
-        if (Engine.GetMainLoop() is not SceneTree tree || tree.Root == null) return;
-        _instance = new DamageTrackerOverlay();
-        tree.Root.CallDeferred(Node.MethodName.AddChild, _instance);
+        _pendingCreate = true;
     }
+
+
 
     public override void _EnterTree()
     {
@@ -620,5 +623,31 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         if (p.Length == 0) return "?";
         if (p.Length == 1) return p[0].Length >= 2 ? p[0][..2].ToUpperInvariant() : p[0].ToUpperInvariant();
         return string.Concat(p[0][0], p[1][0]).ToUpperInvariant();
+    }
+
+    public override void _Process(double _)
+    {
+        if (!_pendingCreate) return;
+        _pendingCreate = false;
+        GD.Print("[DamageTracker] _Process: calling EnsureCreated...");
+        EnsureCreated();
+    }
+
+    public static void EnsureCreated()
+    {
+        if (IsInstanceValid(_instance))
+        {
+            GD.Print("[DamageTracker] EnsureCreated: already exists, skipping");
+            return;
+        }
+        if (Engine.GetMainLoop() is not SceneTree tree || tree.Root == null)
+        {
+            GD.Print("[DamageTracker] EnsureCreated: game loop not ready, re-scheduling");
+            _pendingCreate = true;
+            return;
+        }
+        GD.Print("[DamageTracker] EnsureCreated: creating overlay now!");
+        _instance = new DamageTrackerOverlay();
+        tree.Root.CallDeferred(Node.MethodName.AddChild, _instance);
     }
 }
